@@ -1,0 +1,301 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "forge-std/Script.sol";
+import "../src/AccessController.sol";
+import "../src/PredictionFactory.sol";
+import "../src/PriceOracle.sol";
+import "../src/RiskManager.sol";
+import "../src/Treasury.sol";
+import "../src/PredictionRouter.sol";
+import "../src/BinaryOption.sol";
+
+/**
+ * @title Deploy
+ * @dev 部署脚本
+ */
+contract Deploy is Script {
+    // 配置参数
+    struct DeploymentConfig {
+        address owner;
+        address x404Token;
+        address multiSigWallet;
+        address[] supportedTokens;
+        address[] initialPriceFeeds;
+        uint256[] initialHeartbeats;
+        uint256[] initialDeviationThresholds;
+    }
+
+    // 部署的合约地址
+    struct DeployedContracts {
+        address accessController;
+        address predictionFactory;
+        address priceOracle;
+        // X404PaymentProcessor 已移除，现在使用 X402 协议
+        address riskManager;
+        address treasury;
+        address predictionRouter;
+        address binaryOptionTemplate;
+    }
+
+    function run() external {
+        // 读取配置 (在实际部署中应该从.env文件或配置文件读取)
+        DeploymentConfig memory config = getDeploymentConfig();
+
+        // 部署合约
+        DeployedContracts memory deployed = deployContracts(config);
+
+        // 初始化合约
+        initializeContracts(config, deployed);
+
+        // 验证部署
+        verifyDeployment(deployed);
+
+        // 输出部署信息
+        logDeploymentInfo(deployed);
+    }
+
+    function getDeploymentConfig() internal view returns (DeploymentConfig memory config) {
+        // 从环境变量读取配置
+        config.owner = vm.envAddress("OWNER_ADDRESS");
+        config.x404Token = vm.envAddress("X404_TOKEN_ADDRESS");
+        config.multiSigWallet = vm.envAddress("MULTISIG_WALLET");
+
+        // 读取支持的代币地址
+        address ethAddress = vm.envAddress("ETH_ADDRESS");
+        address usdcAddress = vm.envAddress("USDC_ADDRESS");
+        address usdtAddress = vm.envAddress("USDT_ADDRESS");
+
+        // 支持的代币数组 (ETH, USDC, USDT)
+        config.supportedTokens = new address[](3);
+        config.supportedTokens[0] = ethAddress;
+        config.supportedTokens[1] = usdcAddress;
+        config.supportedTokens[2] = usdtAddress;
+
+        // 读取价格预言机配置
+        address ethUsdFeed = vm.envAddress("ETH_USD_FEED");
+        address usdcUsdFeed = vm.envAddress("USDC_USD_FEED");
+        address usdtUsdFeed = vm.envAddress("USDT_USD_FEED");
+
+        // 初始价格feeds
+        config.initialPriceFeeds = new address[](3);
+        config.initialPriceFeeds[0] = ethUsdFeed;
+        config.initialPriceFeeds[1] = usdcUsdFeed;
+        config.initialPriceFeeds[2] = usdtUsdFeed;
+
+        // 读取心跳时间配置
+        uint256 defaultHeartbeat = vm.envUint("DEFAULT_HEARTBEAT");
+        config.initialHeartbeats = new uint256[](3);
+        config.initialHeartbeats[0] = defaultHeartbeat;
+        config.initialHeartbeats[1] = defaultHeartbeat;
+        config.initialHeartbeats[2] = defaultHeartbeat;
+
+        // 读取价格偏差阈值配置
+        uint256 defaultDeviationThreshold = vm.envUint("DEFAULT_DEVIATION_THRESHOLD");
+        config.initialDeviationThresholds = new uint256[](3);
+        config.initialDeviationThresholds[0] = defaultDeviationThreshold;
+        config.initialDeviationThresholds[1] = defaultDeviationThreshold;
+        config.initialDeviationThresholds[2] = defaultDeviationThreshold;
+    }
+
+    function deployContracts(DeploymentConfig memory config) internal returns (DeployedContracts memory deployed) {
+        vm.startBroadcast(config.owner);
+
+        // 1. 部署AccessController
+        deployed.accessController = address(new AccessController());
+
+        // 2. 部署BinaryOption模板
+        deployed.binaryOptionTemplate = address(new BinaryOption());
+
+        // 3. 部署PriceOracle
+        deployed.priceOracle = address(new PriceOracle());
+
+        // 4. 部署RiskManager (X404PaymentProcessor 已移除，现在使用 X402 协议)
+        deployed.riskManager = address(new RiskManager(
+            address(0), // PredictionFactory稍后设置
+            deployed.priceOracle
+        ));
+
+        // 5. 部署Treasury
+        deployed.treasury = address(new Treasury(config.supportedTokens));
+
+        // 6. 部署PredictionFactory
+        deployed.predictionFactory = address(new PredictionFactory(
+            deployed.binaryOptionTemplate,
+            deployed.priceOracle,
+            address(0), // AIOracle稍后设置
+            address(0), // Treasury稍后设置
+            config.supportedTokens
+        ));
+
+        // 7. 部署PredictionRouter
+        deployed.predictionRouter = address(new PredictionRouter(
+            deployed.predictionFactory,
+            deployed.priceOracle,
+            address(0), // AIOracle稍后设置
+            deployed.riskManager,
+            deployed.treasury
+        ));
+
+        vm.stopBroadcast();
+    }
+
+    function initializeContracts(DeploymentConfig memory config, DeployedContracts memory deployed) internal {
+        vm.startBroadcast(config.owner);
+
+        AccessController accessController = AccessController(deployed.accessController);
+        PredictionFactory factory = PredictionFactory(deployed.predictionFactory);
+        PriceOracle oracle = PriceOracle(deployed.priceOracle);
+        // X404PaymentProcessor 已移除，现在使用 X402 协议
+        RiskManager riskManager = RiskManager(deployed.riskManager);
+        Treasury treasury = Treasury(deployed.treasury);
+        PredictionRouter router = PredictionRouter(deployed.predictionRouter);
+
+        // 1. 初始化AccessController
+        accessController.setMultiSigWallet(config.multiSigWallet);
+
+        // 2. 在AccessController中注册所有合约
+        accessController.addContract("PredictionFactory", deployed.predictionFactory);
+        accessController.addContract("PriceOracle", deployed.priceOracle);
+        // X404PaymentProcessor 已移除，现在使用 X402 协议
+        accessController.addContract("RiskManager", deployed.riskManager);
+        accessController.addContract("Treasury", deployed.treasury);
+        accessController.addContract("PredictionRouter", deployed.predictionRouter);
+
+        // 3. 初始化PriceOracle
+        for (uint256 i = 0; i < config.initialPriceFeeds.length; i++) {
+            oracle.addPriceFeed(
+                config.supportedTokens[i],
+                config.initialPriceFeeds[i],
+                config.initialHeartbeats[i],
+                config.initialDeviationThresholds[i]
+            );
+        }
+
+        // 4. 更新RiskManager配置 (X404PaymentProcessor 已移除，现在使用 X402 协议)
+        riskManager.setPredictionFactory(deployed.predictionFactory);
+
+        // 5. 更新Treasury配置
+        treasury.setRecipientAddresses(
+            config.owner,        // platformReserve
+            config.owner,        // liquidityProvider
+            config.owner,        // aiProvider
+            config.owner         // teamReward
+        );
+
+        // 6. 更新PredictionRouter合约地址
+        factory.setRiskManager(deployed.riskManager);
+        factory.setTreasury(deployed.treasury);
+
+        // 7. 初始化风险管理和财库参数
+        initializeRiskAndTreasuryParameters();
+
+        // 8. 在各合约中设置AccessController
+        accessController.grantRole(keccak256("OPERATOR_ROLE"), deployed.predictionRouter);
+        accessController.grantRole(keccak256("ORACLE_ROLE"), deployed.priceOracle);
+        accessController.grantRole(keccak256("RISK_MANAGER_ROLE"), deployed.riskManager);
+        accessController.grantRole(keccak256("TREASURY_ROLE"), deployed.treasury);
+
+        vm.stopBroadcast();
+    }
+
+    function initializeRiskAndTreasuryParameters() internal {
+        // 从环境变量读取风险管理参数
+        uint256 maxPoolSize = vm.envUint("MAX_POOL_SIZE");
+        uint256 maxBetAmount = vm.envUint("MAX_BET_AMOUNT");
+        uint256 maxUserExposure = vm.envUint("MAX_USER_EXPOSURE");
+        uint256 circuitBreakerThreshold = vm.envUint("CIRCUIT_BREAKER_THRESHOLD");
+        uint256 minBetAmount = vm.envUint("MIN_BET_AMOUNT");
+        uint256 maxWinningStreak = vm.envUint("MAX_WINNING_STREAK");
+        uint256 maxLosingStreak = vm.envUint("MAX_LOSING_STREAK");
+
+        // 从环境变量读取财库参数
+        uint256 platformFeeRate = vm.envUint("PLATFORM_FEE_RATE");
+        uint256 platformReserveShare = vm.envUint("PLATFORM_RESERVE_SHARE");
+        uint256 liquidityProviderShare = vm.envUint("LIQUIDITY_PROVIDER_SHARE");
+        uint256 aiProviderShare = vm.envUint("AI_PROVIDER_SHARE");
+        uint256 teamRewardShare = vm.envUint("TEAM_REWARD_SHARE");
+        uint256 treasuryShare = vm.envUint("TREASURY_SHARE");
+
+        console.log("Initialize risk and treasury parameters...");
+        console.log("Max Pool Size:      ", maxPoolSize);
+        console.log("Max Bet Amount:     ", maxBetAmount);
+        console.log("Max User Exposure:  ", maxUserExposure);
+        console.log("Circuit Breaker:    ", circuitBreakerThreshold);
+        console.log("Platform Fee Rate:  ", platformFeeRate);
+    }
+
+    function verifyDeployment(DeployedContracts memory deployed) internal view {
+        // 验证合约地址不为零
+        require(deployed.accessController != address(0), "AccessController not deployed");
+        require(deployed.predictionFactory != address(0), "PredictionFactory not deployed");
+        require(deployed.priceOracle != address(0), "PriceOracle not deployed");
+        // X404PaymentProcessor 已移除，现在使用 X402 协议
+        require(deployed.riskManager != address(0), "RiskManager not deployed");
+        require(deployed.treasury != address(0), "Treasury not deployed");
+        require(deployed.predictionRouter != address(0), "PredictionRouter not deployed");
+        require(deployed.binaryOptionTemplate != address(0), "BinaryOption template not deployed");
+
+        // 验证合约所有权
+        require(
+            AccessController(deployed.accessController).owner() != address(0),
+            "AccessController owner not set"
+        );
+        require(
+            PredictionFactory(deployed.predictionFactory).owner() != address(0),
+            "PredictionFactory owner not set"
+        );
+        require(
+            PriceOracle(deployed.priceOracle).owner() != address(0),
+            "PriceOracle owner not set"
+        );
+    }
+
+    function logDeploymentInfo(DeployedContracts memory deployed) internal view {
+        console.log("Prediction Platform Deployment Complete!");
+        console.log("==========================================");
+        console.log("AccessController:     ", deployed.accessController);
+        console.log("PredictionFactory:    ", deployed.predictionFactory);
+        console.log("PriceOracle:          ", deployed.priceOracle);
+        console.log("X404PaymentProcessor: Removed (now using X402 protocol)");
+        console.log("RiskManager:          ", deployed.riskManager);
+        console.log("Treasury:             ", deployed.treasury);
+        console.log("PredictionRouter:     ", deployed.predictionRouter);
+        console.log("BinaryOptionTemplate: ", deployed.binaryOptionTemplate);
+        console.log("==========================================");
+        console.log("Next Steps:");
+        console.log("1. Update AI Oracle contract address");
+        console.log("2. Set up X402 protocol integration");
+        console.log("3. Configure real price feeds for your target tokens");
+        console.log("4. Configure risk parameters based on your needs");
+        console.log("5. Set up monitoring and alerting");
+    }
+
+    /**
+     * @dev 升级脚本 (用于合约升级)
+     */
+    function upgradeContract(
+        address accessController,
+        string memory contractName,
+        address newImplementation
+    ) external {
+        // 这里实现升级逻辑
+        // 需要根据具体的升级机制来实现
+    }
+
+    /**
+     * @dev 暂停系统脚本
+     */
+    function emergencyPause(address accessController) external {
+        // 这里实现紧急暂停逻辑
+        AccessController(accessController).emergencyPauseAll();
+    }
+
+    /**
+     * @dev 恢复系统脚本
+     */
+    function emergencyUnpause(address accessController) external {
+        // 这里实现紧急恢复逻辑
+        AccessController(accessController).emergencyUnpauseAll();
+    }
+}
