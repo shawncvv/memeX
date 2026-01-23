@@ -21,41 +21,12 @@ contract DeployMemePredictionMarket is Script {
             console2.log("Using deployer as fee recipient");
         }
 
-        // Supported tokens - load from env or use defaults
-        address usdc = vm.envAddress("USDC_ADDRESS");
-        address usdt = vm.envAddress("USDT_ADDRESS");
-
-        // Default to zero addresses if not set (will need to be added later)
-        if (usdc == address(0)) {
-            console2.log("Warning: USDC_ADDRESS not set, using address(0)");
-        }
-        if (usdt == address(0)) {
-            console2.log("Warning: USDT_ADDRESS not set, will add later via addSupportedToken()");
-        }
-
-        // Count how many tokens to support
-        uint256 tokenCount = 0;
-        if (usdc != address(0)) tokenCount++;
-        if (usdt != address(0)) tokenCount++;
-
-        address[] memory supportedTokens = new address[](tokenCount);
-        uint256 idx = 0;
-        if (usdc != address(0)) {
-            supportedTokens[idx] = usdc;
-            console2.log("USDC:", usdc);
-            idx++;
-        }
-        if (usdt != address(0)) {
-            supportedTokens[idx] = usdt;
-            console2.log("USDT:", usdt);
-        }
-
         console2.log("Deploying MemePredictionMarket...");
         console2.log("Fee recipient:", feeRecipient);
 
         vm.startBroadcast(deployerPrivateKey);
 
-        MemePredictionMarket market = new MemePredictionMarket(feeRecipient, supportedTokens);
+        MemePredictionMarket market = new MemePredictionMarket(feeRecipient);
 
         vm.stopBroadcast();
 
@@ -64,6 +35,7 @@ contract DeployMemePredictionMarket is Script {
         console2.log("Contract Address:", address(market));
         console2.log("Owner:", market.owner());
         console2.log("Fee Recipient:", market.feeRecipient());
+        console2.log("USDC:", market.USDC());
         console2.log("");
 
         // Output for verification

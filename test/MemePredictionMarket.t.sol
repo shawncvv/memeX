@@ -46,8 +46,8 @@ contract TestToken is IERC20 {
         return true;
     }
 
-    // Mint tokens for testing (only callable during setup)
-    function _mintForTest(address to, uint256 amount) internal {
+    // Mint tokens for testing
+    function mint(address to, uint256 amount) external {
         _balances[to] += amount;
         _totalSupply += amount;
     }
@@ -68,26 +68,16 @@ contract MemePredictionMarketTest is Test {
         user1 = makeAddr("user1");
         user2 = makeAddr("user2");
 
-        // Deploy test token
+        // Deploy test token (USDC mock)
         usdc = new TestToken();
 
-        // Give users tokens by directly setting storage
-        // Storage layout: _balances is at slot 0
-        bytes32 balanceSlot = bytes32(uint256(0));
-        bytes32 user1Key = keccak256(abi.encode(user1, balanceSlot));
-        bytes32 user2Key = keccak256(abi.encode(user2, balanceSlot));
-        bytes32 totalSupplyKey = bytes32(uint256(1)); // _totalSupply is at slot 1
-
-        vm.store(address(usdc), user1Key, bytes32(uint256(1000 ether)));
-        vm.store(address(usdc), user2Key, bytes32(uint256(1000 ether)));
-        vm.store(address(usdc), totalSupplyKey, bytes32(uint256(2000 ether)));
+        // Give users tokens
+        usdc.mint(user1, 1000 ether);
+        usdc.mint(user2, 1000 ether);
 
         // Deploy market
-        address[] memory tokens = new address[](1);
-        tokens[0] = address(usdc);
-
         vm.prank(owner);
-        market = new MemePredictionMarket(feeRecipient, tokens);
+        market = new MemePredictionMarket(feeRecipient);
     }
 
     // ============ 创建事件测试 ============
@@ -117,7 +107,7 @@ contract MemePredictionMarketTest is Test {
 
         vm.prank(user1);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, true, 1 ether, address(usdc));
+        market.placeBet(eventId, true, 1 ether);
 
         MemePredictionMarket.Event memory evt = market.getEvent(eventId);
         assertEq(evt.yesPool, 1 ether);
@@ -130,11 +120,11 @@ contract MemePredictionMarketTest is Test {
 
         vm.prank(user1);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, true, 1 ether, address(usdc));
+        market.placeBet(eventId, true, 1 ether);
 
         vm.prank(user2);
         usdc.approve(address(market), 3 ether);
-        market.placeBet(eventId, false, 3 ether, address(usdc));
+        market.placeBet(eventId, false, 3 ether);
 
         MemePredictionMarket.Event memory evt = market.getEvent(eventId);
         assertEq(evt.yesPool, 1 ether);
@@ -149,11 +139,11 @@ contract MemePredictionMarketTest is Test {
 
         vm.prank(user1);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, true, 1 ether, address(usdc));
+        market.placeBet(eventId, true, 1 ether);
 
         vm.prank(user2);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, false, 1 ether, address(usdc));
+        market.placeBet(eventId, false, 1 ether);
 
         (uint256 yesOdds, uint256 noOdds) = market.getCurrentOdds(eventId);
         assertEq(yesOdds, 5e17);
@@ -167,11 +157,11 @@ contract MemePredictionMarketTest is Test {
 
         vm.prank(user1);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, true, 1 ether, address(usdc));
+        market.placeBet(eventId, true, 1 ether);
 
         vm.prank(user2);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, false, 1 ether, address(usdc));
+        market.placeBet(eventId, false, 1 ether);
 
         vm.warp(block.timestamp + 3601);
 
@@ -188,11 +178,11 @@ contract MemePredictionMarketTest is Test {
 
         vm.prank(user1);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, true, 1 ether, address(usdc));
+        market.placeBet(eventId, true, 1 ether);
 
         vm.prank(user2);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, false, 1 ether, address(usdc));
+        market.placeBet(eventId, false, 1 ether);
 
         vm.warp(block.timestamp + 3601);
 
@@ -210,11 +200,11 @@ contract MemePredictionMarketTest is Test {
 
         vm.prank(user1);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, true, 1 ether, address(usdc));
+        market.placeBet(eventId, true, 1 ether);
 
         vm.prank(user2);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, false, 1 ether, address(usdc));
+        market.placeBet(eventId, false, 1 ether);
 
         vm.warp(block.timestamp + 3601);
 
@@ -235,11 +225,11 @@ contract MemePredictionMarketTest is Test {
 
         vm.prank(user1);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, true, 1 ether, address(usdc));
+        market.placeBet(eventId, true, 1 ether);
 
         vm.prank(user2);
         usdc.approve(address(market), 1 ether);
-        market.placeBet(eventId, false, 1 ether, address(usdc));
+        market.placeBet(eventId, false, 1 ether);
 
         vm.warp(block.timestamp + 3601);
 
@@ -258,13 +248,13 @@ contract MemePredictionMarketTest is Test {
 
         vm.prank(user1);
         usdc.approve(address(market), 10 ether);
-        market.placeBet(eventId, true, 10 ether, address(usdc));
+        market.placeBet(eventId, true, 10 ether);
 
         vm.prank(user2);
         usdc.approve(address(market), 10 ether);
-        market.placeBet(eventId, false, 10 ether, address(usdc));
+        market.placeBet(eventId, false, 10 ether);
 
-        (uint256 yesOdds, uint256 noOdds) = market.getCurrentOdds(eventId);
+        (uint256 yesOdds, ) = market.getCurrentOdds(eventId);
         assertEq(yesOdds, 5e17);
 
         vm.warp(block.timestamp + 3601);
@@ -287,11 +277,11 @@ contract MemePredictionMarketTest is Test {
 
         vm.prank(user1);
         usdc.approve(address(market), 100 ether);
-        market.placeBet(eventId, true, 100 ether, address(usdc));
+        market.placeBet(eventId, true, 100 ether);
 
         vm.prank(user2);
         usdc.approve(address(market), 300 ether);
-        market.placeBet(eventId, false, 300 ether, address(usdc));
+        market.placeBet(eventId, false, 300 ether);
 
         (uint256 yesOdds, uint256 noOdds) = market.getCurrentOdds(eventId);
         assertEq(yesOdds, 25e16);

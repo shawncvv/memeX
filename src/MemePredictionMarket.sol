@@ -6,14 +6,14 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title MemePredictionMarket
-/// @dev 最简预测市场合约 - 单合约搞定所有功能
-/// 流程: 后端创建事件 -> 用户下注 -> 任意时间平仓/1小时后结算 -> 领取奖励
+/// @dev 简化预测市场合约 - 仅支持 USDC
 contract MemePredictionMarket is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ============ 常量 ============
     uint256 public constant PRECISION = 1e18;
     uint256 public constant FEE_RATE = 300; // 3% 平台手续费 (基点)
+    address public constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48; // 主网地址
 
     // ============ 事件 ============
     event EventCreated(uint256 indexed eventId, string tokenSymbol, uint256 basePrice, uint256 endTime);
@@ -25,12 +25,8 @@ contract MemePredictionMarket is ReentrancyGuard {
     // ============ 错误 ============
     error InvalidAmount();
     error EventNotActive();
-    error EventAlreadyResolved();
     error BettingEnded();
-    error NoLiquidity();
     error NoRewards();
-    error TransferFailed();
-    error UnsupportedToken();
 
     // ============ 枚举 ============
     enum EventStatus {
@@ -41,13 +37,13 @@ contract MemePredictionMarket is ReentrancyGuard {
 
     // ============ 数据结构 ============
     struct Event {
-        string tokenSymbol;       // 代币符号 (如 "PEPE")
-        uint256 basePrice;        // 基准价格 (创建时)
-        uint256 finalPrice;       // 结算价格 (可选)
+        string tokenSymbol;       // 代币符号
+        uint256 basePrice;        // 基准价格
+        uint256 finalPrice;       // 结算价格
         uint256 endTime;          // 结算时间
         uint256 yesPool;          // YES 池子
         uint256 noPool;           // NO 池子
-        uint256 totalPool;        // 总池子 (yesPool + noPool)
+        uint256 totalPool;        // 总池子
         uint256 totalFees;        // 手续费
         bool yesWins;             // YES 是否获胜
         EventStatus status;       // 事件状态
@@ -55,10 +51,9 @@ contract MemePredictionMarket is ReentrancyGuard {
     }
 
     struct UserBet {
-        uint256 eventId;
-        bool isYes;
-        uint256 amount;           // 下注金额
-        uint256 shares;           // 获得的份额
+        uint256 amount;           // 总下注金额
+        uint256 shares;           // 总份额
+        bool isYes;               // 投注方向
         bool claimed;             // 是否已领取
     }
 
@@ -67,7 +62,6 @@ contract MemePredictionMarket is ReentrancyGuard {
     mapping(uint256 => Event) public events;
     mapping(uint256 => mapping(address => UserBet)) public userBets;
     mapping(uint256 => address[]) public eventUsers;
-    mapping(address => bool) public supportedTokens;
     mapping(uint256 => mapping(address => bool)) public hasParticipated;
 
     address public feeRecipient;
@@ -80,16 +74,13 @@ contract MemePredictionMarket is ReentrancyGuard {
     }
 
     // ============ 构造函数 ============
-    constructor(address _feeRecipient, address[] memory _supportedTokens) {
+    constructor(address _feeRecipient) {
         owner = msg.sender;
         feeRecipient = _feeRecipient;
-        for (uint256 i = 0; i < _supportedTokens.length; i++) {
-            supportedTokens[_supportedTokens[i]] = true;
-        }
         _nextEventId = 1;
     }
 
-    // ============ 核心功能: 后端创建事件 ============
+    // ============ 核心功能: 创建事件 ============
     function createEvent(
         string calldata tokenSymbol,
         uint256 basePrice,
@@ -117,28 +108,27 @@ contract MemePredictionMarket is ReentrancyGuard {
         });
 
         emit EventCreated(eventId, tokenSymbol, basePrice, endTime);
-        return eventId;
     }
 
-    // ============ 核心功能: 用户下注 ============
+    // ============ 核心功能: 下注 ============
     function placeBet(
         uint256 eventId,
         bool isYes,
-        uint256 amount,
-        address token
-    ) external payable nonReentrant {
-        require(supportedTokens[token], "Unsupported token");
-        require(msg.value == 0, "No ETH expected");
+        uint256 amount
+    ) external nonReentrant {
+        require(amount > 0, "Amount must be > 0");
 
         Event storage evt = _getEvent(eventId);
         require(evt.status == EventStatus.ACTIVE, "Event not active");
         require(block.timestamp < evt.endTime, "Betting ended");
 
-        // 接收 ERC20
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        // 接收 USDC
+        IERC20(USDC).safeTransferFrom(msg.sender, address(this), amount);
 
+        // 计算本次下注的份额
         uint256 shares = _calculateShares(amount, evt.yesPool, evt.noPool, isYes);
 
+        // 更新池子
         if (isYes) {
             evt.yesPool += amount;
         } else {
@@ -146,20 +136,71 @@ contract MemePredictionMarket is ReentrancyGuard {
         }
         evt.totalPool += amount;
 
+        // 记录用户首次参与
         if (!hasParticipated[eventId][msg.sender]) {
             hasParticipated[eventId][msg.sender] = true;
             eventUsers[eventId].push(msg.sender);
         }
 
-        userBets[eventId][msg.sender] = UserBet({
-            eventId: eventId,
-            isYes: isYes,
-            amount: amount,
-            shares: shares,
-            claimed: false
-        });
+        // 聚合下注：重新计算用户在当前池子下的总份额
+        _aggregateBet(evt, eventId, msg.sender, isYes, amount, shares);
 
         emit BetPlaced(eventId, msg.sender, isYes, amount, shares);
+    }
+
+    // ============ 聚合下注 ============
+    function _aggregateBet(
+        Event storage evt,
+        uint256 eventId,
+        address user,
+        bool isYes,
+        uint256 amount,
+        uint256 newShares
+    ) internal {
+        UserBet storage bet = userBets[eventId][user];
+
+        if (bet.amount == 0) {
+            // 首次下注
+            bet.amount = amount;
+            bet.shares = newShares;
+            bet.isYes = isYes;
+            bet.claimed = false;
+        } else {
+            // 聚合下注：需要重新计算总份额
+            // 移除之前金额对池子的影响
+            if (bet.isYes) {
+                evt.yesPool -= bet.amount;
+            } else {
+                evt.noPool -= bet.amount;
+            }
+            evt.totalPool -= bet.amount;
+
+            // 更新总金额
+            uint256 newTotalAmount = bet.amount + amount;
+
+            // 在当前池子基础上重新计算总份额
+            // CPMM: shares = totalAmount * totalPool / (currentPool + totalAmount)
+            uint256 currentPool = isYes ? evt.yesPool : evt.noPool;
+            uint256 totalPool = evt.yesPool + evt.noPool;
+
+            if (currentPool == 0) {
+                // 对方池为空，直接用金额作为份额
+                bet.shares = newTotalAmount;
+            } else {
+                bet.shares = (newTotalAmount * totalPool) / (currentPool + newTotalAmount);
+            }
+
+            // 添加新金额到池子
+            if (isYes) {
+                evt.yesPool += newTotalAmount;
+            } else {
+                evt.noPool += newTotalAmount;
+            }
+            evt.totalPool += newTotalAmount;
+
+            bet.amount = newTotalAmount;
+            bet.isYes = isYes;
+        }
     }
 
     // ============ 核心功能: 结算事件 ============
@@ -168,20 +209,26 @@ contract MemePredictionMarket is ReentrancyGuard {
         require(evt.status == EventStatus.ACTIVE, "Event not active");
         require(block.timestamp >= evt.endTime, "Not ended yet");
 
-        bool yesWins = finalPrice >= evt.basePrice;
-
         evt.finalPrice = finalPrice;
-        evt.yesWins = yesWins;
+        evt.yesWins = finalPrice >= evt.basePrice;
         evt.status = EventStatus.RESOLVED;
 
-        emit EventResolved(eventId, finalPrice, yesWins);
+        emit EventResolved(eventId, finalPrice, evt.yesWins);
     }
 
     // ============ 核心功能: 批量结算 ============
     function batchResolve(uint256[] calldata eventIds, uint256[] calldata finalPrices) external onlyOwner {
         require(eventIds.length == finalPrices.length, "Length mismatch");
         for (uint256 i = 0; i < eventIds.length; i++) {
-            _resolveEventInternal(eventIds[i], finalPrices[i]);
+            Event storage evt = _getEvent(eventIds[i]);
+            require(evt.status == EventStatus.ACTIVE, "Event not active");
+            require(block.timestamp >= evt.endTime, "Not ended yet");
+
+            evt.finalPrice = finalPrices[i];
+            evt.yesWins = finalPrices[i] >= evt.basePrice;
+            evt.status = EventStatus.RESOLVED;
+
+            emit EventResolved(eventIds[i], finalPrices[i], evt.yesWins);
         }
     }
 
@@ -194,6 +241,7 @@ contract MemePredictionMarket is ReentrancyGuard {
         UserBet storage bet = userBets[eventId][msg.sender];
         require(bet.amount > 0 && !bet.claimed, "No bet or already settled");
 
+        // 计算 payout
         uint256 payout;
         if (bet.isYes) {
             uint256 noShare = evt.noPool > 0 ? (bet.shares * evt.noPool) / evt.yesPool : 0;
@@ -207,10 +255,18 @@ contract MemePredictionMarket is ReentrancyGuard {
         evt.totalFees += fee;
         payout -= fee;
 
-        bet.claimed = true;
-        _safeTransfer(payable(msg.sender), payout);
+        // 从池子中扣除
+        if (bet.isYes) {
+            evt.yesPool -= bet.amount;
+        } else {
+            evt.noPool -= bet.amount;
+        }
+        evt.totalPool -= bet.amount;
 
-        emit EarlySettled(eventId, msg.sender, bet.amount, payout - bet.amount);
+        bet.claimed = true;
+        IERC20(USDC).safeTransfer(msg.sender, payout);
+
+        emit EarlySettled(eventId, msg.sender, bet.amount, payout - bet.amount - fee);
     }
 
     // ============ 核心功能: 领取奖励 ============
@@ -221,8 +277,11 @@ contract MemePredictionMarket is ReentrancyGuard {
         UserBet storage bet = userBets[eventId][msg.sender];
         require(bet.amount > 0, "No bet");
         require(!bet.claimed, "Already claimed");
-        require(_isWinner(evt, bet), "You lost");
 
+        bool isWinner = (evt.yesWins && bet.isYes) || (!evt.yesWins && !bet.isYes);
+        require(isWinner, "You lost");
+
+        // 计算 payout
         uint256 winningPool = evt.yesWins ? evt.yesPool : evt.noPool;
         uint256 losingPool = evt.yesWins ? evt.noPool : evt.yesPool;
         uint256 payout = _calculatePayout(bet.amount, bet.shares, winningPool, losingPool);
@@ -231,8 +290,16 @@ contract MemePredictionMarket is ReentrancyGuard {
         evt.totalFees += fee;
         payout -= fee;
 
+        // 从池子中扣除
+        if (bet.isYes) {
+            evt.yesPool -= bet.amount;
+        } else {
+            evt.noPool -= bet.amount;
+        }
+        evt.totalPool -= bet.amount;
+
         bet.claimed = true;
-        _safeTransfer(payable(msg.sender), payout);
+        IERC20(USDC).safeTransfer(msg.sender, payout);
 
         emit RewardsClaimed(eventId, msg.sender, payout);
     }
@@ -243,20 +310,8 @@ contract MemePredictionMarket is ReentrancyGuard {
         feeRecipient = recipient;
     }
 
-    function addSupportedToken(address token) external onlyOwner {
-        supportedTokens[token] = true;
-    }
-
-    function removeSupportedToken(address token) external onlyOwner {
-        supportedTokens[token] = false;
-    }
-
-    function rescueETH(uint256 amount) external onlyOwner {
-        _safeTransfer(payable(msg.sender), amount);
-    }
-
-    function rescueToken(address token, uint256 amount) external onlyOwner {
-        IERC20(token).safeTransfer(msg.sender, amount);
+    function rescueToken(uint256 amount) external onlyOwner {
+        IERC20(USDC).safeTransfer(msg.sender, amount);
     }
 
     // ============ 查询函数 ============
@@ -296,7 +351,8 @@ contract MemePredictionMarket is ReentrancyGuard {
                 payout = bet.amount + yesShare;
             }
         } else if (evt.status == EventStatus.RESOLVED) {
-            if (_isWinner(evt, bet)) {
+            bool isWinner = (evt.yesWins && bet.isYes) || (!evt.yesWins && !bet.isYes);
+            if (isWinner) {
                 uint256 winningPool = evt.yesWins ? evt.yesPool : evt.noPool;
                 uint256 losingPool = evt.yesWins ? evt.noPool : evt.yesPool;
                 payout = _calculatePayout(bet.amount, bet.shares, winningPool, losingPool);
@@ -305,19 +361,6 @@ contract MemePredictionMarket is ReentrancyGuard {
     }
 
     // ============ 内部函数 ============
-    function _resolveEventInternal(uint256 eventId, uint256 finalPrice) internal {
-        Event storage evt = _getEvent(eventId);
-        require(evt.status == EventStatus.ACTIVE, "Event not active");
-        require(block.timestamp >= evt.endTime, "Not ended yet");
-
-        bool yesWins = finalPrice >= evt.basePrice;
-        evt.finalPrice = finalPrice;
-        evt.yesWins = yesWins;
-        evt.status = EventStatus.RESOLVED;
-
-        emit EventResolved(eventId, finalPrice, yesWins);
-    }
-
     function _getEvent(uint256 eventId) internal view returns (Event storage) {
         Event storage evt = events[eventId];
         require(evt.initialized, "Event not found");
@@ -356,16 +399,4 @@ contract MemePredictionMarket is ReentrancyGuard {
 
         return payout;
     }
-
-    function _isWinner(Event storage evt, UserBet storage bet) internal view returns (bool) {
-        if (evt.yesWins && bet.isYes) return true;
-        if (!evt.yesWins && !bet.isYes) return true;
-        return false;
-    }
-
-    function _safeTransfer(address payable to, uint256 amount) internal {
-        require(to.send(amount), "Transfer failed");
-    }
-
-    receive() external payable {}
 }
